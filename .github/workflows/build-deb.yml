@@ -1,0 +1,135 @@
+name: Build iOS 16.x Non-JB .dylib & .deb
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: "Debian package version override (leave empty for 0.1.<run_number>)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "build-deb-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build-deb:
+    name: Build arm64 .dylib & .deb
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Resolve version & permissions
+        id: meta
+        env:
+          INPUT_VER: ${{ inputs.package_version }}
+        run: |
+          set -euo pipefail
+          chmod +x build.sh package-deb.py
+          VER="${INPUT_VER:-0.1.${GITHUB_RUN_NUMBER:-1}}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests & deb packager self-test
+        run: ./build.sh test
+
+      - name: Build arm64 iOS 16.0+ .dylib & .deb
+        env:
+          QA_TOUCH_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          ./build.sh deb
+
+      - name: Verify packaged .deb & embedded .dylib
+        id: verify
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, os, pathlib, re, subprocess, sys, tarfile
+
+          debs = sorted(pathlib.Path("packages").glob("*.deb"))
+          if not debs:
+              print("::error::No .deb produced")
+              sys.exit(1)
+          deb_path = debs[0]
+          dylib_path = pathlib.Path("obj") / "QATouchRecorder.dylib"
+
+          members = subprocess.check_output(["ar", "-t", str(deb_path)], text=True).splitlines()
+          assert members == ["debian-binary", "control.tar.gz", "data.tar.gz"], members
+
+          ctrl_raw = subprocess.check_output(["ar", "-p", str(deb_path), "control.tar.gz"])
+          with tarfile.open(fileobj=io.BytesIO(ctrl_raw), mode="r:gz") as tf:
+              ctrl_txt = tf.extractfile("./control").read().decode("utf-8")
+          print(ctrl_txt)
+          assert "mobilesubstrate" not in ctrl_txt.lower()
+
+          data_raw = subprocess.check_output(["ar", "-p", str(deb_path), "data.tar.gz"])
+          with tarfile.open(fileobj=io.BytesIO(data_raw), mode="r:gz") as tf:
+              names = tf.getnames()
+              assert "./Library/MobileSubstrate/DynamicLibraries/QATouchRecorder.dylib" in names, names
+              assert "./Library/MobileSubstrate/DynamicLibraries/QATouchRecorder.plist" in names, names
+
+          lipo_out = subprocess.check_output(["lipo", "-info", str(dylib_path)], text=True)
+          otool_load = subprocess.check_output(["otool", "-l", str(dylib_path)], text=True)
+          assert "arm64" in lipo_out and "x86_64" not in lipo_out
+          assert "IOSSIMULATOR" not in otool_load
+          assert re.search(r"\bplatform\s+(?:2|IOS)\b", otool_load)
+
+          deb_sha = hashlib.sha256(deb_path.read_bytes()).hexdigest()
+          dylib_sha = hashlib.sha256(dylib_path.read_bytes()).hexdigest()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"deb_path={deb_path}\n")
+              out.write(f"deb_name={deb_path.name}\n")
+              out.write(f"dylib_path={dylib_path}\n")
+              out.write(f"dylib_name={dylib_path.name}\n")
+          print(f"[PASS] Verified {deb_path.name} (SHA-256: {deb_sha})")
+          print(f"[PASS] Verified {dylib_path.name} (SHA-256: {dylib_sha})")
+          PY
+
+      - name: Publish Direct .deb & .dylib to GitHub Release
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.meta.outputs.version }}
+          DEB_PATH: ${{ steps.verify.outputs.deb_path }}
+          DEB_NAME: ${{ steps.verify.outputs.deb_name }}
+          DYLIB_PATH: ${{ steps.verify.outputs.dylib_path }}
+          DYLIB_NAME: ${{ steps.verify.outputs.dylib_name }}
+        run: |
+          set -euo pipefail
+          TAG="latest"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TITLE="QATouchRecorder v${VER} — iOS 16.0+ Non-JB .dylib & .deb"
+          NOTES="Standalone non-jailbreak arm64 iOS 16.0+ build \`v${VER}\` from commit \`${SHORT_SHA}\` (CI run #${GITHUB_RUN_NUMBER})."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DEB_PATH" "$DYLIB_PATH" --clobber
+            gh release edit "$TAG" --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" "$DEB_PATH" "$DYLIB_PATH" --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
+          BASE_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Built QATouchRecorder v${VER}"
+              echo "- **Direct \`.deb\`**: ${BASE_URL}/${DEB_NAME}"
+              echo "- **Direct \`.dylib\`**: ${BASE_URL}/${DYLIB_NAME}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload .deb & .dylib CI Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qa-touch-recorder-ios16-arm64-deb
+          path: |
+            ${{ steps.verify.outputs.deb_path }}
+            ${{ steps.verify.outputs.dylib_path }}
+          retention-days: 30
+          if-no-files-found: error

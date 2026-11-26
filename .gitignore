@@ -1,0 +1,9 @@
+# Build outputs & local artifacts
+obj/
+packages/
+.theos/
+*.dylib
+*.deb
+*.ipa
+*.dSYM/
+.DS_Store
