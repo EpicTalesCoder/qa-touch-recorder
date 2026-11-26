@@ -158,8 +158,8 @@ static UIScrollView * _Nullable QAFindScrollableViewAtPoint(CGPoint pt) {
         while (cursor) {
             if ([cursor isKindOfClass:[UIScrollView class]]) {
                 UIScrollView *sv = (UIScrollView *)cursor;
-                BOOL canScrollX = sv.contentSize.width > sv.bounds.width + 1.0;
-                BOOL canScrollY = sv.contentSize.height > sv.bounds.height + 1.0;
+                BOOL canScrollX = sv.contentSize.width > CGRectGetWidth(sv.bounds) + 1.0;
+                BOOL canScrollY = sv.contentSize.height > CGRectGetHeight(sv.bounds) + 1.0;
                 if (sv.scrollEnabled && (canScrollX || canScrollY)) {
                     return sv;
                 }
@@ -181,17 +181,17 @@ static BOOL QADispatchSwipeBetweenPoints(CGPoint startPt, CGPoint endPt) {
     CGFloat dy = startPt.y - endPt.y;
 
     if (sv.pagingEnabled && fabs(dx) > fabs(dy) && fabs(dx) >= 24.0) {
-        dx = (dx > 0.0) ? sv.bounds.width : -sv.bounds.width;
+        dx = (dx > 0.0) ? CGRectGetWidth(sv.bounds) : -CGRectGetWidth(sv.bounds);
     }
     if (sv.pagingEnabled && fabs(dy) >= fabs(dx) && fabs(dy) >= 24.0) {
-        dy = (dy > 0.0) ? sv.bounds.height : -sv.bounds.height;
+        dy = (dy > 0.0) ? CGRectGetHeight(sv.bounds) : -CGRectGetHeight(sv.bounds);
     }
 
     UIEdgeInsets inset = sv.adjustedContentInset;
     CGFloat minX = -inset.left;
-    CGFloat maxX = MAX(minX, sv.contentSize.width - sv.bounds.width + inset.right);
+    CGFloat maxX = MAX(minX, sv.contentSize.width - CGRectGetWidth(sv.bounds) + inset.right);
     CGFloat minY = -inset.top;
-    CGFloat maxY = MAX(minY, sv.contentSize.height - sv.bounds.height + inset.bottom);
+    CGFloat maxY = MAX(minY, sv.contentSize.height - CGRectGetHeight(sv.bounds) + inset.bottom);
 
     CGFloat targetX = MIN(MAX(sv.contentOffset.x + dx, minX), maxX);
     CGFloat targetY = MIN(MAX(sv.contentOffset.y + dy, minY), maxY);
